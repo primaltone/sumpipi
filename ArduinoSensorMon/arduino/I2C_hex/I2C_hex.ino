@@ -7,8 +7,8 @@
 #include "Timer.h"
 #include "DHT.h"
 #define DEBUG
-#define PRINT_HEX
-#define TIMER_SENSOR_PRINT
+//#define PRINT_HEX
+//#define TIMER_SENSOR_PRINT
 /* GPIO assignment */
 #define ANALOG_CURRENT_PIN	7 
 #define DHTPIN 2     // what digital pin we're connected to
@@ -85,7 +85,7 @@
 EnergyMonitor emon1;  // for current sensor
 DHT dht(DHTPIN, DHT22); // for temp/humidity sensor
 
-#define RX_BUF_SIZE 16 
+#define RX_BUF_SIZE 64 
 #define TX_BUF_SIZE 16
 #define EVT_BUF_SIZE 32
 ringBufS rxBuffer;
@@ -102,6 +102,7 @@ ringBufS evtBuffer;
 #define PARSE_COMMAND	0x06	
 #define LOOP_BACK_GET_LENGTH 0x07	
 #define LOOP_BACK_BYTES	     0x08	
+#define GET_SEQUENCE_ID       0x09
 
 #define MAX_DATA_REQUEST 16
 #define COMMAND 0
@@ -111,6 +112,7 @@ unsigned char receive_byte_index = 0;
 unsigned char receive_state = GET_START_BYTE;
 unsigned char xor_cs = 0;
 unsigned char receive_buffer[MAX_DATA_REQUEST]; // jwd maybe too large
+unsigned char sequenceID=0;
 // sensor flags
 #define TIMER_ENABLED	(1<<0)
 #define INT_ENABLED	(2<<0)
@@ -167,7 +169,7 @@ void SetupRingBuffer(struct running_avg* avg_data) {
 	avg_data->curr->next=avg_data->list;
 } 
 
-int updateRunningAverage(struct running_avg *avg_data, int new_distance){
+int updateRunningAverage(struct running_avg *avg_data, int new_distance){ 
 	struct sample_data *avgRunner;
 	int NumElements = sizeof(avg_data->list)/sizeof(sample_data);
 	int i,sum=0;
@@ -243,20 +245,21 @@ void initEventBuffer() {
 }
 int addEvent(unsigned char reason, unsigned char type, unsigned char *dataBuf, int size) {
 	int rc = -1;
-	//<START_BYTE> <length> <EVENT> <reason: SENSOR> <type: alarm> <data....>
-	// sizeofData = 1 (START_BYTE) + 1( LENGTH) + 1 (EVENT) + 1 (reason) + 1 (type) + size of event data
+	//<START_BYTE> <sequence ID> <length> <EVENT> <reason: SENSOR> <type: alarm> <data....>
+	// sizeofData = 1 (START_BYTE) + 1 (<sequence ID>) + 1( LENGTH) + 1 (EVENT) + 1 (reason) + 1 (type) + size of event data
 
-	eventWritePtr->buf[0] = START_BYTE;
-	eventWritePtr->buf[1] = size + 3; // jwd : 4 includes EVENT, reason, type
-	eventWritePtr->buf[2] = EVENT;
-	eventWritePtr->buf[3] = reason;
-	eventWritePtr->buf[4] = type;
+  eventWritePtr->buf[0] = START_BYTE;
+  eventWritePtr->buf[1] = sequenceID;
+	eventWritePtr->buf[2] = size + 3; // jwd : 3 includes EVENT, reason, type
+	eventWritePtr->buf[3] = EVENT;
+	eventWritePtr->buf[4] = reason;
+	eventWritePtr->buf[5] = type;
 	// jwd more sloppy
-#define HEADER_SIZE  5
+#define HEADER_SIZE  6
 #define CS_SIZE	1
 	eventWritePtr->size = size + HEADER_SIZE + CS_SIZE;
 
-	// buffer size must accommodate data + the 3 byte header
+	// buffer size must accommodate data + the 4 byte header
 	if ((eventWritePtr->size) <= EVENT_SIZE) { // buffer is large enough to hold data
 		memcpy(&eventWritePtr->buf[HEADER_SIZE],dataBuf,size);
 		eventWritePtr->buf[eventWritePtr->size-1]=get_xor_cs(eventWritePtr->buf,eventWritePtr->size-1);
@@ -283,12 +286,12 @@ int addEvent(unsigned char reason, unsigned char type, unsigned char *dataBuf, i
 
 void getEvent(){
 	if (!eventCount) {
-		char unsigned buf[] = {(unsigned char)START_BYTE,1,(unsigned char)EVENT,0};
+		char unsigned buf[] = {(unsigned char)START_BYTE,sequenceID,1,(unsigned char)EVENT,0};
 		buf[sizeof(buf)-1] = get_xor_cs(buf,sizeof(buf)-1);
 		sprintln("load event");	
-		RingBufWriteBlock(buf,4,&txBuffer);// jwd sloppy	
+		RingBufWriteBlock(buf,sizeof(buf),&txBuffer);// jocar not sloppy	
 	}
-	else {// if (eventReadPtr) 
+	else {// if (eventReadPtr)  // jocar says this bytes, change to construct response and use sequence ID
 		RingBufWriteBlock(eventReadPtr->buf,eventReadPtr->size,&txBuffer);	
 		eventCount --;
 		eventReadPtr = eventReadPtr->next;
@@ -302,7 +305,7 @@ void distanceUpdate(void) {
 	unsigned char buf[2];
 	unsigned int value = distanceSensor.distance = (unsigned int) (getDistance()*100);
 	int avg = updateRunningAverage(&distance_running_avg,value);
-	sprint("dist: ");sprint(value);sprint("  avg:  ");sprintln(avg);
+	//sprint("dist: ");sprint(value);sprint("  avg:  ");sprintln(avg);
 	
 	if ((sensor->high_threshold && (avg > sensor->high_threshold)) ||
 			(sensor->low_threshold && (avg < sensor->low_threshold))) {
@@ -403,7 +406,11 @@ void RingBufWriteBlock(unsigned char *buf, int size, ringBufS *ringBuf) {
 	}
 
 	if (!ringBufS_empty(ringBuf))  // jwd debug this needs to come out
-		digitalWrite(I2C_READY_TO_PI,1);
+  {
+ 		digitalWrite(I2C_READY_TO_PI,1);
+  }
+  else
+    sprintln("not setting I2C ready");
 	//interrupts();
 }
 
@@ -414,21 +421,25 @@ void HandleSensorCommand(unsigned char *bufPtr) {
 			switch (bufPtr[1]) {
 				case CURRENTPROBE:
 					{
-						unsigned char buf[]={START_BYTE,0, // fill in size later
-							(unsigned char) SENSOR,
+						unsigned char buf[]={START_BYTE,
+              (unsigned char) sequenceID,
+						  0, // fill in size later
+              (unsigned char) SENSOR,
 							(unsigned char) READ,
 							(unsigned char) bufPtr[1],
 							(unsigned char)((currentSensor.lastCurrentReadingx1000 >> 8) & 0xFF),
 							(unsigned char)(currentSensor.lastCurrentReadingx1000 & 0xFF),
 							0}; // fill in cs later
-						buf[1]=sizeof(buf)-3;
+						buf[2]=sizeof(buf)-4;
 						buf[sizeof(buf)-1] = get_xor_cs(buf,sizeof(buf));
 						RingBufWriteBlock(buf,sizeof(buf),&txBuffer);
 					}
 					break;
 				case DISTSENSOR1:
 					{
-						unsigned char buf[]={START_BYTE,0, // fill in size later
+						unsigned char buf[]={START_BYTE,
+              (unsigned char) sequenceID,
+						  0, // fill in size later
 							(unsigned char) SENSOR,
 							(unsigned char) READ,
 							(unsigned char) bufPtr[1],
@@ -436,7 +447,7 @@ void HandleSensorCommand(unsigned char *bufPtr) {
 							(unsigned char)(distanceSensor.distance & 0xFF),
 							0}; // fill in cs later
 
-						buf[1]=sizeof(buf)-3;
+						buf[2]=sizeof(buf)-4;
 						buf[sizeof(buf)-1] = get_xor_cs(buf,sizeof(buf));
 
 						RingBufWriteBlock(buf,sizeof(buf),&txBuffer);
@@ -445,8 +456,10 @@ void HandleSensorCommand(unsigned char *bufPtr) {
 				case TEMP_HUMIDITY:
 					{
 						unsigned int temperature = (unsigned int)(getTemp()*10);
-						unsigned int humidity = (unsigned int)(getHumidity()*9);
-						unsigned char buf[]={START_BYTE,0, // fill in size later
+						unsigned int humidity = (unsigned int)(getHumidity()*9); // jocar says I'm stoopid; he's right
+            unsigned char buf[]={START_BYTE,
+              (unsigned char) sequenceID,
+              0, // fill in size later
 							(unsigned char) SENSOR,
 							(unsigned char) READ,
 							(unsigned char) bufPtr[1],
@@ -457,7 +470,7 @@ void HandleSensorCommand(unsigned char *bufPtr) {
 							(unsigned char)( humidity & 0xFF),
 							0}; // fill in cs later
 
-						buf[1]=sizeof(buf)-3;
+						buf[2]=sizeof(buf)-4;
 						buf[sizeof(buf)-1] = get_xor_cs(buf,sizeof(buf));
 
 						RingBufWriteBlock(buf,sizeof(buf),&txBuffer);
@@ -580,31 +593,44 @@ void receiveData(int byteCount){
 		if (!ringBufS_full(&rxBuffer)) {
 			unsigned char rc = Wire.read();
 #ifdef PRINT_HEX
-				sprint(">");sprintln(rc,HEX);
+			 	sprint(">");sprintln(rc,HEX);
 #endif       
 			ringBufS_put (&rxBuffer, rc);
 		}
 		else {
-			sprintln("RX Buffer Overflow");
+			sprint("RX Buffer Overflow: toss ");
 			// generate an error event here; for now, just deplete data
-			Wire.read();
+			unsigned char rc = Wire.read();
+			sprintln(rc,HEX);
 		}
 	}
 }	
 
 void sendData(void) {
-	if(!ringBufS_empty(&txBuffer)) {
+#if 0
+if(!ringBufS_empty(&txBuffer)) {
 		Wire.write(ringBufS_get(&txBuffer));
 		if(ringBufS_empty(&txBuffer)) 
 			digitalWrite(I2C_READY_TO_PI,0); 
 	}
+#endif
+if(!ringBufS_empty(&txBuffer)) {
+    unsigned char sendByte = ringBufS_get(&txBuffer);
+    Wire.write(sendByte);
+       // sprint("<");sprintln(sendByte,HEX);
+    
+    if(ringBufS_empty(&txBuffer))
+     {
+      digitalWrite(I2C_READY_TO_PI,0); 
+     }
+  }
 }
 
 void GenerateInterrupt(int state){
 	digitalWrite(INT_TO_PI, state);
 }
 void initSensor(struct sensor_data *sensor) {
-
+  
 	sensor->low_threshold=0;
 	sensor->high_threshold=0;
 	sensor->flags=0;
@@ -665,11 +691,15 @@ void parseCommand(void) {
 	}
 }
 unsigned char getByte(ringBufS *rb){
-	unsigned char rc;
-	//noInterrupts();
-	rc =ringBufS_get(rb);
-	//interrupts();
-	return rc;
+	int rc=-1;
+	noInterrupts();
+   rc =ringBufS_get(rb);
+  while ( rc < 0)
+  {
+	   rc =ringBufS_get(rb);
+  }
+  interrupts();
+	return (unsigned char)rc;
 }
 
 int zeroCount=0;
@@ -686,7 +716,7 @@ void parseData(ringBufS *buffer){
 
 			receive_byte_index = 0;
 			if ((rc=getByte(&rxBuffer)) == START_BYTE) {
-				receive_state =	GET_LENGTH_BYTE;
+				receive_state =	GET_SEQUENCE_ID;
 				xor_cs = START_BYTE;
 				zeroCount=0;
 			}
@@ -721,6 +751,11 @@ void parseData(ringBufS *buffer){
 			ringBufS_put(&txBuffer,rc);
 		}
 #endif
+    else if (receive_state == GET_SEQUENCE_ID) {
+        sequenceID=getByte(&rxBuffer);
+        receive_state = GET_LENGTH_BYTE;
+        xor_cs ^= sequenceID;
+      }
 		else if (receive_state == GET_LENGTH_BYTE) {
 			if ((receive_read_count=getByte(&rxBuffer)) <= MAX_DATA_REQUEST) {
 				xor_cs^=receive_read_count;
@@ -734,7 +769,8 @@ void parseData(ringBufS *buffer){
 		}
 		else if (receive_state == GET_DATA_BYTE) {
 
-			unsigned char rc=getByte(&rxBuffer);
+			unsigned char rc;
+			rc=getByte(&rxBuffer);
 			receive_buffer[receive_byte_index++] = rc;	
 			xor_cs^=rc;
 			if (receive_byte_index == receive_read_count) {
@@ -742,8 +778,9 @@ void parseData(ringBufS *buffer){
 			}
 		}
 		else if (receive_state == GET_CS_BYTE) {
-			unsigned char rc=getByte(&rxBuffer);
-
+			unsigned char rc;
+		rc=getByte(&rxBuffer);
+ 
 			if (xor_cs == rc) {
 				// cs good
 				receive_state = PARSE_COMMAND;
