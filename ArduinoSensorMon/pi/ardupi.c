@@ -2,26 +2,29 @@
 #include <stdio.h>
 #include <errno.h>
 #include <string.h>
+#include <unistd.h>
 #include <sys/stat.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/signal.h>
 #include "wiringPi.h"
+#include "wiringPiI2C.h"
 #include "requests.h"
 
 #define VERSION 1.0
-#define PRINT_I2C
-#define PRINT_SENSOR
+//#define PRINT_I2C
+//#define PRINT_SENSOR
 
 //#define LOG_FILE_FOLDER "/home/pi/logs/"
 //#define ERROR_LOG		"error.txt"
 #define ERROR_LOG		stdout
-#define LAST_SUMP_DATA_FILE	"/var/tmp/sump_info.txt"
-#define LAST_TEMP_HUMIDITY_FILE	"/var/tmp/temp_humidity.txt"
+//#define LAST_SUMP_DATA_FILE	"/var/tmp/sump_info.txt"
+//#define LAST_TEMP_HUMIDITY_FILE	"/var/tmp/temp_humidity.txt"
+#define LAST_SUMP_DATA_FILE	"/var/www/html/rt_stats/sump_info.txt"
+#define LAST_TEMP_HUMIDITY_FILE	"/var/www/html/rt_stats/temp_humidity.txt"
 #define TEMP_HUMIDITY_LOG	"temp_humidity.txt"
 #define DISTANCE_LOG		"sump_distance.txt"
 #define SUMP_CYCLE_STAT_FILE	"sump_cycle_stat.txt"
-#define SENSOR_TO_BOTTOM_OF_WELL_INCHES 34 // make me a variable
 
 #ifdef PRINT_I2C 
 #define printI2C(ARGS...) printf(ARGS)
@@ -34,7 +37,7 @@
 #define printSensor(ARGS...) do {} while (0)
 #endif 
 
-#define DISTANCE_INTERVAL	3
+#define DISTANCE_INTERVAL	1
 #define CURRENT_INTERVAL	1
 #define TEMP_HUMIDITY_INTERVAL	5
 
@@ -51,13 +54,13 @@
 #define GET_DISTANCE		3
 #define GET_TEMP_HUMIDITY	4
 #define GET_CURRENT		5 
-
+#define INIT    6
 #define EVENT           0x02
 #define LOOPBACK        0x03
 
 #define CURRENTPROBE    0x01
 #define DISTSENSOR1     0x02
-#define TEMP_HUMIDITY   0x03 // jwd should I separate?
+#define TEMP_HUMIDITY   0x03
 #define USE_CS          (1 << 0)
 #define REQUEST_REPLY   (1 << 1)
 /*
@@ -85,6 +88,9 @@
 /* recall that wiring pi gpio's are strange. remember to run "gpio readall" to get the wiringpi designated pio */
 #define ARDUINO_INT_PIO	7 // gpio 4 according to pinout
 #define ARDUINO_I2C_READY 0 // gpio 17 according to pinout
+
+#define SENSOR_TO_BOTTOM_OF_WELL_INCHES 34
+
 char *logFolder; 
 char *emailAddressTo=NULL;
 char *emailAddressFrom=NULL;
@@ -93,11 +99,13 @@ int GetEvent(void);
 void UpdateSumpStats(void);
 int SendCmd(const unsigned char command, const unsigned char subcommand, const unsigned char type,
 		const unsigned char *dataBuf, const unsigned char dataSize);
+void setupAlarmThresholds(void);
+int getResponse(unsigned char *buf, int bufSize);
 unsigned long sumpRunTime_ms=0;
 unsigned long sumpRunCycles=0;
 struct request_list reqList;
 // jwd move timer stuff to different file
-
+unsigned char sequenceID=0;
 int verbose=1; // jwd change me
 /*
    for saving samples, combine sump distance with pump data. i.e.:
@@ -110,7 +118,7 @@ int verbose=1; // jwd change me
 
 int sendmail(const char *to, const char *from, const char *subject, const char *message) {
 	int retval = -1;
-	static warn_once=0;
+	static int warn_once=0;
 	FILE *mailpipe;
 
 	if (!to || !from) {
@@ -139,7 +147,7 @@ char * FormatTime(const time_t time, char *timeStr,const int bufsize) {
 
 	if (timeStr) {
 		info = localtime( &time );
-		strftime(timeStr, bufsize, "%Y-%m-%d %H:%M:%S %Z", info);
+		strftime(timeStr, bufsize, "%Y-%m-%d %H:%M:%S", info);
 	}
 	return timeStr;
 }
@@ -162,7 +170,7 @@ int SaveSample(const time_t time, unsigned char *buf, unsigned int bufSize, char
 
 
 	// copy base path to file name buf
-	if (!basePath || ! strncpy(fullLogFileName,basePath,sizeof(fullLogFileName))){
+	if (!basePath || ! strncpy(fullLogFileName,basePath,sizeof(fullLogFileName))) {
 		printf("Error getting basepath\n");
 	}
 	else if(!FormatDate(time,dateBuf,sizeof(dateBuf))) {
@@ -235,13 +243,11 @@ void create_timer(unsigned i,void (*func)(union sigval arg)) {
 	ts.it_interval.tv_nsec = 0;
 
 	status = timer_create(CLOCK_REALTIME, &se, &timer_id);
-	if (status == -1)
-		errno_abort("Create timer");
+	if (status == -1) errno_abort("Create timer");
 
 	// TODO maybe we'll need to have an array of itimerspec
 	status = timer_settime(timer_id, 0, &ts, 0);
-	if (status == -1)
-		errno_abort("Set timer");
+	if (status == -1) errno_abort("Set timer");
 }
 
 void arduinoInterrupt(void) {
@@ -258,12 +264,13 @@ int i2cWriteBlock(unsigned char * buf, int bytesToWrite, const int fd) {
 	{
 		int i;
 		unsigned char *bufStart=buf-bytesWritten;
-		for (i=0; i< bytesWritten;i++)
+		for (i=0; i< bytesWritten;i++) {
 			printI2C("%02x@",*bufStart++);
+		}
 		printI2C("\n");
 	}
 #endif	
-	if(rc<0){
+	if(rc<0) {
 		printf("writeblock failed rc=%d\n",rc);
 	}
 	if(rc>=0) rc = bytesWritten;
@@ -273,9 +280,9 @@ int i2cWriteBlock(unsigned char * buf, int bytesToWrite, const int fd) {
 unsigned char xor_cs (unsigned char *buf, int size) {
 	int i;
 	unsigned char cs=0;
-	for (i=0; i<(size);i++)
+	for (i=0; i<(size);i++) {
 		cs^=buf[i];
-
+	}
 	return cs;
 }
 
@@ -296,13 +303,21 @@ int getArduinoI2Cdata(unsigned char *buf, int size, const int fd) {
 		}
 	}
 
-	if (rc >= 0) rc = bytesRead;
+	if (retryCount >= MAX_RETRY) {
+		printf("I2c Error: timed out waiting for data ready\n");
+		rc = -2;
+	} else if (rc < 0) {
+		printf("Error reading from I2C device. rc = %d %s\n",rc,strerror(errno));
+	}
+	else if (rc >= 0) {
+		rc = bytesRead;
+	}
 	return rc;
 }
 
 int GetEvent(void) {
 	int rc, i;
-	unsigned char getEvent[]={START_BYTE,1,EVENT,0};
+	unsigned char getEvent[]={START_BYTE,sequenceID++,1,EVENT,0};
 	char rspBuf[32]; // jwd fixme
 
 	getEvent[sizeof(getEvent)-1]= xor_cs(getEvent,sizeof(getEvent)-1);
@@ -311,19 +326,24 @@ int GetEvent(void) {
 		rc = getResponse(rspBuf, sizeof(rspBuf));
 
 		if (rc >= 0) {
-			if (rspBuf[2] == DISTSENSOR1){
+			if (rspBuf[2] == DISTSENSOR1) {
 				int strSize;
 				char buf[64];
 				int distance = ((rspBuf[3] << 8) | rspBuf[4]);
 				float percent_change;
-				strSize=snprintf(buf,sizeof(buf)-1,"water_height: %.2f sump_run_time: %.2fs sump_cycles: %lu\n",
-						(float)distance/100.,sumpRunTime_ms/1000.,sumpRunCycles);
+				float waterHeight;
+
+				// sensor measures distance to water. convert to height from bottom of well
+				waterHeight = SENSOR_TO_BOTTOM_OF_WELL_INCHES - (float)distance/100.0; 
+				strSize=snprintf(buf,sizeof(buf)-1,"water height: %.2f\" sump run time: %.2fs sump cycles: %lu\n",
+						waterHeight,sumpRunTime_ms/1000.,sumpRunCycles);
 				printSensor("%s",buf);
 				SaveSample(time(NULL),buf,strSize,logFolder,DISTANCE_LOG);
 				sendmail(emailAddressTo,emailAddressFrom,"Sump Monitor WARNING!!\n",buf);
 			}
-			else if (rspBuf[2] == CURRENTPROBE){
+			else if (rspBuf[2] == CURRENTPROBE) {
 				unsigned long time_on = (rspBuf[3] << 24) | (rspBuf[4] << 16) | (rspBuf[5] << 8) | rspBuf[6];
+				// jwd grab timestamp here to indicate "last time ran"
 				sumpRunTime_ms+=time_on;
 				sumpRunCycles++;
 				printSensor("sump on: %lums total: %lums sump cycle count: %lu\n",time_on,sumpRunTime_ms,sumpRunCycles);
@@ -340,6 +360,17 @@ int writeToTempFile(char *buf, char *fileName) {
 		printf("failed to open %s",fileName);
 	}
 	else {
+		char timeBuf[128]; char dateBuf[11];
+		if(!FormatDate(time(NULL),dateBuf,sizeof(dateBuf))) {
+			printf("Error creating date string\n");
+		}
+		else if (!FormatTime(time(NULL),timeBuf,sizeof(timeBuf))) {
+			printf("Error creating time string\n");
+		}
+		else {
+			write (tmpFileFD,timeBuf,strlen(timeBuf)); write(tmpFileFD," ",1);
+
+		}
 		write (tmpFileFD, buf,strlen(buf));
 		close (tmpFileFD);
 	}
@@ -353,7 +384,7 @@ int ReadSensorData(int sensorID) {
 	if ((rc=SendCmd(SENSOR,READ,sensorID,0,0)) < 0) {
 		printf("Error sending read for sensor: %d\n",sensorID);
 	}
-	else if ((rc=getResponse(rspBuf, sizeof(rspBuf)))< 0){
+	else if ((rc=getResponse(rspBuf, sizeof(rspBuf)))< 0) {
 		printf("Error reading response for sensor: %d\n",sensorID);
 	}
 	else {
@@ -364,9 +395,11 @@ int ReadSensorData(int sensorID) {
 					int strSize,tmpFileFD;
 					char buf[64];
 					int distance = ((rspBuf[3] << 8) | rspBuf[4]);
-
-					strSize=snprintf(buf,sizeof(buf)-1,"water_height: %.2f sump_run_time: %.2fs sump_cycles: %lu\n",
-							(float)distance/100.,sumpRunTime_ms/1000.,sumpRunCycles);
+					float waterHeight;
+					// sensor measures distance to water. convert to height from bottom of well
+					waterHeight = SENSOR_TO_BOTTOM_OF_WELL_INCHES - (float)distance/100.0; 
+					strSize=snprintf(buf,sizeof(buf)-1,"water height: %.2f\" sump run time: %.2fs sump cycles: %lu\n",
+							waterHeight,sumpRunTime_ms/1000.,sumpRunCycles);
 					printSensor("%s",buf);
 					SaveSample(time(NULL),buf,strSize,logFolder,DISTANCE_LOG);
 
@@ -383,10 +416,15 @@ int ReadSensorData(int sensorID) {
 				{
 					int strSize;
 					char buf[64];
-					float temperature = (((rspBuf[3] << 8) | rspBuf[4]))/10.0;
-					float humidity = (((rspBuf[5] << 8) | rspBuf[6]))/10.0;
+					float temperature = ((int16_t)((rspBuf[3] << 8) | rspBuf[4]))/100.0;
+					float humidity = ((int16_t)((rspBuf[5] << 8) | rspBuf[6]))/100.0;
 
-					strSize=snprintf(buf,sizeof(buf)-1,"temperature: %.1fF humidity: %.1f\%\n",
+					if ((humidity == 0.0) && (temperature == 0.)) {
+						printf("error reading temp/humidty sensor, discard value\n");
+						rc = -1;
+						break;
+					}
+					strSize=snprintf(buf,sizeof(buf)-1,"temperature: %.2fF humidity: %.2f\%\n",
 							temperature,humidity);
 					printSensor("%s",buf);
 					SaveSample(time(NULL),buf,strSize,logFolder,TEMP_HUMIDITY_LOG);
@@ -402,26 +440,41 @@ int ReadSensorData(int sensorID) {
 
 int getResponse(unsigned char *buf, int bufSize) {
 	int rc;
-	unsigned char dataSize, rxCS, SB;
+	unsigned char dataSize, rxCS, SB,sequenceID;
+
 	if (((rc=getArduinoI2Cdata(&SB, 1, arduinoI2Cfd)) < 0) || (SB != START_BYTE)) {// 1) validate start byte
-		printf("Searching for 0x%02x but received 0x%02x\n",(unsigned char)START_BYTE,SB);	
+		if (rc >=0 ) {
+			printf("searching for 0x%02x but received 0x%02x\n",(unsigned char)START_BYTE,SB);	
+		}
+		else {
+			printf("Error reading from I2C device\n");
+		}
+	}
+	else if ((rc=getArduinoI2Cdata(&sequenceID, 1, arduinoI2Cfd)) < 0) {// 3) get sequence 
+		printf("Error reading sequence ID: rc = %d\n",rc);	
 	}
 	else if ((rc=getArduinoI2Cdata(&dataSize, 1, arduinoI2Cfd)) < 0) {// 3) get data size
-		printf("Error reading data size\n");	
+		printf("Error reading data size: rc = %d\n",rc);	
 	}
 	else if ((dataSize > bufSize) || ((rc=getArduinoI2Cdata(buf,dataSize,arduinoI2Cfd)) < 0)) {
-		printf("Error block reading from device or invalid size\n");
+		if (rc < 0) {
+			printf("Error block reading from device: rc = %d\n",rc);
+		}
+		else {
+			printf("invalid size: expected < bufSize: %d received dataSize: %d\n",bufSize,dataSize);
+		}
 	}
 	else if((rc=getArduinoI2Cdata(&rxCS,1, arduinoI2Cfd)) < 0) {
-		printf("Error receiving cheksum from device\n");
+		printf("Error receiving cheksum from device: rc =  %d\n",rc);
 	}
 	else {
 		unsigned char calcCS=0;
 		int i;
 
-		calcCS = START_BYTE^(unsigned char)dataSize;
-		for(i=0;i<dataSize; i++)
+		calcCS = START_BYTE^(unsigned char)dataSize^sequenceID;
+		for(i=0;i<dataSize; i++) {
 			calcCS^=buf[i];
+		}
 		if (calcCS != rxCS) {
 			printf("bad checksum. expected 0x%02x but received 0x%02x\n",rxCS,calcCS);
 			rc = -2; // create define?
@@ -440,30 +493,32 @@ int SendCmd(const unsigned char command, const unsigned char subcommand, const u
 	unsigned char cs;
 	unsigned char *sendBuf;
 #define CS_SIZE		1
+#define SEQUENCE_BYTE_SIZE	1
 #define START_BYTE_SIZE	1
 #define DATA_SIZE_BYTE	1
-	sendBufSize = START_BYTE_SIZE + DATA_SIZE_BYTE + sizeof(command)+sizeof(subcommand)
+	sendBufSize = START_BYTE_SIZE + SEQUENCE_BYTE_SIZE + DATA_SIZE_BYTE + sizeof(command)+sizeof(subcommand)
 		+sizeof(type)+dataSize+CS_SIZE;
 	sendBuf = (unsigned char *)malloc(sendBufSize);
 	if (sendBuf) {
 		sendBuf[0]=START_BYTE;
-		sendBuf[1]=sizeof(command)+sizeof(subcommand)+sizeof(type)+dataSize;
-		sendBuf[2]=command;
-		sendBuf[3]=subcommand;
-		sendBuf[4]=type;
-		if (dataBuf) memcpy(&sendBuf[5],dataBuf,dataSize); // jwd rc?
+		sendBuf[1]=sequenceID++;
+		sendBuf[2]=sizeof(command)+sizeof(subcommand)+sizeof(type)+dataSize;
+		sendBuf[3]=command;
+		sendBuf[4]=subcommand;
+		sendBuf[5]=type;
+		if (dataBuf) memcpy(&sendBuf[6],dataBuf,dataSize); // jwd rc?
 		cs = xor_cs(sendBuf,sendBufSize - 1);
 		sendBuf[sendBufSize-1] = cs;
 		rc = i2cWriteBlock(sendBuf,sendBufSize, arduinoI2Cfd);
-		if (rc <0)
+		if (rc <0) {
 			printf("SendCmd write failed\n");
+		}
 		free(sendBuf);
 	}
 	else {
 		printf("failed to allocate memory\n");	
 		rc = -1;
 	}
-
 	return rc;
 }
 
@@ -475,9 +530,15 @@ int EnableSensor(int sensorID, int timerDuration_ms) {
 
 	return SendCmd(SENSOR,ENABLE_TIMER,sensorID,timerBufTime,sizeof(timerBufTime)); 
 }
-
 int StopSensor(int sensorID) {
 	return 	SendCmd(SENSOR,DISABLE_TIMER,sensorID,0,0); 	
+}
+
+void initSensors(void)
+{
+	setupAlarmThresholds();
+	EnableSensor(DISTSENSOR1,710);	usleep(250000);
+	EnableSensor(CURRENTPROBE,200); usleep(250000);
 }
 
 void handle_event(struct request* a_request)
@@ -490,29 +551,32 @@ void handle_event(struct request* a_request)
 	}
 	else {
 		switch (a_request->number){
+			case INIT:
+				initSensors();
+				break;
 			case GET_EVENT:
 				printf("Get Event: ");
-				while ((pioVal = digitalRead(ARDUINO_INT_PIO))==1)
-					while ((retryCounter++ < RETRY_MAX) && (GetEvent()<0))
-					{usleep(10000);}
+				while ((pioVal = digitalRead(ARDUINO_INT_PIO))==1) {
+					while ((retryCounter++ < RETRY_MAX) && (GetEvent()<0)) {
+						printf("retry get event: %d\n",retryCounter);
+						usleep(10000);
+					}
+				}
 				break;
 			case GET_DISTANCE:
-				printf("Get Distance: ");
-				while ((retryCounter++ < RETRY_MAX) && (ReadSensorData(DISTSENSOR1)<0)){
+				while ((retryCounter++ < RETRY_MAX) && (ReadSensorData(DISTSENSOR1)<0)) {
 					printf("retry get distance retry: %d\n",retryCounter);
 					usleep(10000);
 				}
 				break;
 			case GET_TEMP_HUMIDITY:
-				printf("Get Temperature and Humidity: ");
-				while ((retryCounter++ < RETRY_MAX) && (ReadSensorData(TEMP_HUMIDITY)<0)){
+				while ((retryCounter++ < RETRY_MAX) && (ReadSensorData(TEMP_HUMIDITY)<0)) {
 					printf("retry get temp humidity retry: %d\n",retryCounter);
 					usleep(10000);
 				}
 				break;
 			case GET_CURRENT:
-				printf("Get Current: ");
-				while ((retryCounter++ < RETRY_MAX) && (ReadSensorData(CURRENTPROBE)<0)){
+				while ((retryCounter++ < RETRY_MAX) && (ReadSensorData(CURRENTPROBE)<0)) {
 					printf("retry get current retry: %d\n",retryCounter);
 					usleep(10000);
 				}
@@ -545,12 +609,14 @@ void setupSumpData(void) {
 		char tag[16];
 		while( fscanf(pFile,"%s",tag) != EOF ) {
 			if( strncmp(tag,SUMP_CYCLE_FIELD,strlen(SUMP_CYCLE_FIELD)) == 0 ) {
-				if (fscanf(pFile,"%ul",&sumpRunCycles) != 1)
+				if (fscanf(pFile,"%ul",&sumpRunCycles) != 1) {
 					printf("error storing saved sump cycle");
+				}
 			}
 			else if( strncmp(tag,SUMP_TIME_FIELD,strlen(SUMP_TIME_FIELD)) == 0 ) {
-				if (fscanf(pFile,"%ul",&sumpRunTime_ms) != 1)
+				if (fscanf(pFile,"%ul",&sumpRunTime_ms) != 1) {
 					printf("error storing saved sump run time");
+				}
 			}
 		}
 		fclose(pFile);
@@ -582,16 +648,15 @@ void UpdateSumpStats(void) {
 int setupLogDir(char *logDir) {
 	int rc;
 	struct stat st = {0};
-	if ( (rc=stat(logDir, &st)) >= 0){ 
+	if ( (rc=stat(logDir, &st)) >= 0) { 
 		// directory already created
 	}
-	else if ((rc=mkdir(logDir, 0777))  == -1){ 
+	else if ((rc=mkdir(logDir, 0777))  == -1) { 
 		printf("error creating directory %s\n",logDir);
 	}
 	return rc;
 }
 void setupAlarmThreshold(unsigned char sensorid, unsigned int th_low, unsigned int th_high) {
-
 	unsigned char buf[4];
 
 	buf[0]=(th_low>>8)&0xFF;
@@ -604,11 +669,11 @@ void setupAlarmThreshold(unsigned char sensorid, unsigned int th_low, unsigned i
 
 void setupAlarmThresholds(void) {
 #define CURRENT_LOW_TH_ma  100
-#define CURRENT_HIGH_TH_ma 120	
+#define CURRENT_HIGH_TH_ma 1000	
 #define DIST_LOW_TH_inches 0
 #define DIST_HIGH_TH_inches 24.58	
 
-	setupAlarmThreshold(DISTSENSOR1,DIST_LOW_TH_inches*100.,DIST_HIGH_TH_inches*100.);
+	// jwd put me back; right now it's constant alarmage	setupAlarmThreshold(DISTSENSOR1,DIST_LOW_TH_inches*100.,DIST_HIGH_TH_inches*100.);
 	setupAlarmThreshold(CURRENTPROBE,CURRENT_LOW_TH_ma,CURRENT_HIGH_TH_ma);
 }
 
@@ -677,7 +742,6 @@ int main( int argc, char * argv[] ) {
 						exit(-1);
 					}
 					break;
-
 				case 'l':
 					if ( argc >= numOptions) {
 						numOptions++;
@@ -694,18 +758,6 @@ int main( int argc, char * argv[] ) {
 						exit(-1);
 					}
 					break;
-#if 0
-				case 'v':
-					if ( argc >= numOptions) {
-						verbose=1;
-						numOptions++;
-					}
-					else {
-						PrintSyntax(argv[0]);
-						exit(-1);
-					}
-					break;
-#endif
 				default:
 					printf("\n%c%c is not a valid option",argv[numOptions][0],argv[numOptions][1]);
 					PrintSyntax(argv[0]);
@@ -747,17 +799,11 @@ int main( int argc, char * argv[] ) {
 	/* make sure we get any pending events */
 	add_request(&reqList,GET_EVENT, &reqList.request_mutex, &reqList.got_request);
 
-	setupAlarmThresholds();
-
-	StopSensor(DISTSENSOR1); usleep(250000);
-	EnableSensor(DISTSENSOR1,2000);	usleep(250000);
-	StopSensor(CURRENTPROBE); usleep(250000);
-	EnableSensor(CURRENTPROBE,200); usleep(250000);
+	add_request(&reqList,INIT, &reqList.request_mutex, &reqList.got_request);
 
 	/* start timers */
 	create_timer(DISTANCE_INTERVAL,distance_thread);
 	create_timer(CURRENT_INTERVAL,current_thread);
 	create_timer(TEMP_HUMIDITY_INTERVAL,temp_humidity_thread);
-
-	while (1) sleep (1);
+	(void)pthread_join(arduinoIntThread,NULL);
 }

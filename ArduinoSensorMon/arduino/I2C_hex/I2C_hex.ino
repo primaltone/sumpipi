@@ -1,9 +1,9 @@
 // Include Emon Libraryd
 #include "EmonLib.h"
-
 #include <Wire.h>
 #include "ringBufS.h"
 #include <string.h>
+#include <stdint.h>
 #include "Timer.h"
 #include "DHT.h"
 #define DEBUG
@@ -19,11 +19,9 @@
 #define READ    0x01
 #define ENABLE_TIMER  0x03
 #define DISABLE_TIMER	0x04
-#define TEST_EVENT 0x05
 #define SET_ALARM_THRESHOLD 0X06
 
 #define EVENT		0x02
-#define LOOPBACK	0x03
 
 #define CURRENTPROBE	0x01
 #define DISTSENSOR1	0x02
@@ -93,15 +91,12 @@ ringBufS txBuffer;
 ringBufS evtBuffer;
 
 #define START_BYTE	0xBD
-#define LOOP_BACK_BYTE	0xDB
 // jwd change to enum
 #define GET_START_BYTE	0x01	
 #define GET_LENGTH_BYTE	0x02	
 #define GET_DATA_BYTE	0x04	
 #define GET_CS_BYTE	0x05	
 #define PARSE_COMMAND	0x06	
-#define LOOP_BACK_GET_LENGTH 0x07	
-#define LOOP_BACK_BYTES	     0x08	
 #define GET_SEQUENCE_ID       0x09
 
 #define MAX_DATA_REQUEST 16
@@ -169,7 +164,7 @@ void SetupRingBuffer(struct running_avg* avg_data) {
 	avg_data->curr->next=avg_data->list;
 } 
 
-int updateRunningAverage(struct running_avg *avg_data, int new_distance){ 
+int updateRunningAverage(struct running_avg *avg_data, int new_distance){
 	struct sample_data *avgRunner;
 	int NumElements = sizeof(avg_data->list)/sizeof(sample_data);
 	int i,sum=0;
@@ -182,14 +177,13 @@ int updateRunningAverage(struct running_avg *avg_data, int new_distance){
 		avgRunner=avgRunner->next; 
 	} 	
 	avg_data->curr=avg_data->curr->next;
-	
+
 	return (sum/NumElements);
 }
 
 float getDistance(void) {
 	long duration;
 	float distance;
-//	noInterrupts();
 	/* water level */
 	digitalWrite(TRIGGER_PIO, LOW);  // Added this line
 	delayMicroseconds(2); // Added this line
@@ -197,15 +191,13 @@ float getDistance(void) {
 	delayMicroseconds(10); // Added this line
 	digitalWrite(TRIGGER_PIO, LOW);
 	duration = pulseIn(ECHO_PIN, HIGH);
-	//interrupts();
 	distance = ((duration/2) / 29.1)/2.54;// jwd  - change to bounded while to check for valid value?
-	if (distance >= 200 || distance <= 0) 
+	if (distance >= 200 || distance <= 0) {
 		sprintln("Out of range");
-
+	}
 
 #ifdef TIMER_SENSOR_PRINT
-	sprint(distance);
-	sprintln("\"");
+	sprint(distance); sprintln("\"");
 #endif
 	return distance;
 } 
@@ -223,8 +215,9 @@ int eventCount=0;
 
 unsigned char get_xor_cs(unsigned char *buf, int size){
 	unsigned char cs=0;
-	while (size--) 
+	while (size--) {
 		cs^=*buf++;
+	}
 	return cs;
 }
 
@@ -241,15 +234,15 @@ void initEventBuffer() {
 	}
 	// point last element to first
 	eventList[EVENT_COUNT-1].next = eventList;
-
 }
+
 int addEvent(unsigned char reason, unsigned char type, unsigned char *dataBuf, int size) {
 	int rc = -1;
 	//<START_BYTE> <sequence ID> <length> <EVENT> <reason: SENSOR> <type: alarm> <data....>
 	// sizeofData = 1 (START_BYTE) + 1 (<sequence ID>) + 1( LENGTH) + 1 (EVENT) + 1 (reason) + 1 (type) + size of event data
 
-  eventWritePtr->buf[0] = START_BYTE;
-  eventWritePtr->buf[1] = sequenceID;
+	eventWritePtr->buf[0] = START_BYTE;
+	eventWritePtr->buf[1] = sequenceID;
 	eventWritePtr->buf[2] = size + 3; // jwd : 3 includes EVENT, reason, type
 	eventWritePtr->buf[3] = EVENT;
 	eventWritePtr->buf[4] = reason;
@@ -263,7 +256,7 @@ int addEvent(unsigned char reason, unsigned char type, unsigned char *dataBuf, i
 	if ((eventWritePtr->size) <= EVENT_SIZE) { // buffer is large enough to hold data
 		memcpy(&eventWritePtr->buf[HEADER_SIZE],dataBuf,size);
 		eventWritePtr->buf[eventWritePtr->size-1]=get_xor_cs(eventWritePtr->buf,eventWritePtr->size-1);
-		
+
 		if (!eventCount ) { // is list empty?
 			eventReadPtr = eventWritePtr;
 			eventWritePtr = eventWritePtr->next;
@@ -276,8 +269,9 @@ int addEvent(unsigned char reason, unsigned char type, unsigned char *dataBuf, i
 			eventWritePtr = eventWritePtr->next;
 		}
 
-		if (eventCount < EVENT_COUNT)
+		if (eventCount < EVENT_COUNT) {
 			eventCount++;
+		}
 		rc = eventWritePtr->size;
 		GenerateInterrupt(1);
 	}
@@ -295,8 +289,9 @@ void getEvent(){
 		RingBufWriteBlock(eventReadPtr->buf,eventReadPtr->size,&txBuffer);	
 		eventCount --;
 		eventReadPtr = eventReadPtr->next;
-		if (!eventCount)
+		if (!eventCount) {
 			GenerateInterrupt(0);
+		}
 	}
 }
 
@@ -306,7 +301,7 @@ void distanceUpdate(void) {
 	unsigned int value = distanceSensor.distance = (unsigned int) (getDistance()*100);
 	int avg = updateRunningAverage(&distance_running_avg,value);
 	//sprint("dist: ");sprint(value);sprint("  avg:  ");sprintln(avg);
-	
+
 	if ((sensor->high_threshold && (avg > sensor->high_threshold)) ||
 			(sensor->low_threshold && (avg < sensor->low_threshold))) {
 
@@ -319,30 +314,11 @@ void distanceUpdate(void) {
 
 float getCurrent(void) {
 	/* current sensor */
-#if 1
-	float Irms;
-//	noInterrupts();
-	Irms  = emon1.calcIrms(1480);  // Calculate Irms only
-//interrupts();
-#else
 	float Irms = emon1.calcIrms(1480);  // Calculate Irms only
-#endif
-
 
 #ifdef TIMER_SENSOR_PRINT
-	sprint(Irms*LINE_VOLTAGE);           // Apparent power
-	sprint(" ");
-	sprintln(Irms);             // Irms
+	sprint(Irms*LINE_VOLTAGE); sprint(" "); sprintln(Irms);
 #endif
-	/*
-	 *    if turning on, record start time
-	 *    if turning off, record stop time and make sure there's a "valid" start before calculating difference and providing bad data
-	 *       send event that includes run duration in milliseconds
-	 *
-	 *    data to include when issuing event: run time
-	 *
-	 *
-	 */
 	return Irms;
 }
 
@@ -353,15 +329,24 @@ void currentUpdate(void) {
 	static unsigned char recordingCurrentDuration = 0;
 	static unsigned long starttime;
 
+	/*
+	 *    if turning on, record start time
+	 *    if turning off, record stop time and make sure there's a "valid" start before calculating difference and providing bad data
+	 *       send event that includes run duration in milliseconds
+	 *
+	 *    data to include when issuing event: run time
+	 *
+	 */
+
 	if (sensor->high_threshold && (value > sensor->high_threshold) && !recordingCurrentDuration) {
 		starttime = millis();
-    sprint("start recording time: ");sprintln(starttime);
+		sprint("start recording time: ");sprintln(starttime);
 		recordingCurrentDuration = 1;
 	}
 	else if (recordingCurrentDuration && sensor->low_threshold && (value < sensor->low_threshold)){
 		unsigned long stoptime = millis();
 		unsigned long duration = stoptime - starttime;
-    sprint("stop recording time:"); sprintln(stoptime);
+		sprint("stop recording time:"); sprintln(stoptime);
 		sprint("stop recording duration. duration ="); sprintln(duration);
 		recordingCurrentDuration = 0;
 		buf[0]=	(unsigned char)(( duration >> 24) & 0xFF);
@@ -373,45 +358,32 @@ void currentUpdate(void) {
 }
 
 float getTemp(void) {
-	float temp;
-//	noInterrupts();
-	temp = dht.readTemperature(true);
-	//interrupts();
+	float temp = dht.readTemperature(true);
 
 #ifdef TIMER_SENSOR_PRINT
-	sprint("temperature, F: ");
-	sprintln(temp);             // Irms
+	sprint("temperature, F: "); sprintln(temp);
 #endif
 	return temp;
 }
 float getHumidity(void) {
-	float humidity;
-//	noInterrupts();
-	humidity = dht.readHumidity();
-	//interrupts();
+	float humidity = dht.readHumidity();
 #ifdef TIMER_SENSOR_PRINT
-	sprint("humidity: ");
-	sprintln(humidity);             // Irms
+	sprint("humidity: "); sprintln(humidity);
 #endif
 	return humidity;
 }
 void RingBufWriteBlock(unsigned char *buf, int size, ringBufS *ringBuf) {
 	int i;
-//	noInterrupts();
 	for (int i=0; i<size; i++) {
 #ifdef PRINT_HEX
-    sprint("^");sprintln(buf[i],HEX); // jwd remove me to reduce debug spam
+		sprint("^");sprintln(buf[i],HEX); // jwd remove me to reduce debug spam
 #endif    
 		ringBufS_put(ringBuf,buf[i]);
 	}
 
-	if (!ringBufS_empty(ringBuf))  // jwd debug this needs to come out
-  {
- 		digitalWrite(I2C_READY_TO_PI,1);
-  }
-  else
-    sprintln("not setting I2C ready");
-	//interrupts();
+	if (!ringBufS_empty(ringBuf)) {
+		digitalWrite(I2C_READY_TO_PI,1);
+	}
 }
 
 // jwd should check all commands for size/bounds checking; not doing this yet
@@ -422,9 +394,9 @@ void HandleSensorCommand(unsigned char *bufPtr) {
 				case CURRENTPROBE:
 					{
 						unsigned char buf[]={START_BYTE,
-              (unsigned char) sequenceID,
-						  0, // fill in size later
-              (unsigned char) SENSOR,
+							(unsigned char) sequenceID,
+							0, // fill in size later
+							(unsigned char) SENSOR,
 							(unsigned char) READ,
 							(unsigned char) bufPtr[1],
 							(unsigned char)((currentSensor.lastCurrentReadingx1000 >> 8) & 0xFF),
@@ -438,8 +410,8 @@ void HandleSensorCommand(unsigned char *bufPtr) {
 				case DISTSENSOR1:
 					{
 						unsigned char buf[]={START_BYTE,
-              (unsigned char) sequenceID,
-						  0, // fill in size later
+							(unsigned char) sequenceID,
+							0, // fill in size later
 							(unsigned char) SENSOR,
 							(unsigned char) READ,
 							(unsigned char) bufPtr[1],
@@ -455,11 +427,11 @@ void HandleSensorCommand(unsigned char *bufPtr) {
 					break;
 				case TEMP_HUMIDITY:
 					{
-						unsigned int temperature = (unsigned int)(getTemp()*10);
-						unsigned int humidity = (unsigned int)(getHumidity()*9); // jocar says I'm stoopid; he's right
-            unsigned char buf[]={START_BYTE,
-              (unsigned char) sequenceID,
-              0, // fill in size later
+						int16_t temperature = (int16_t)(getTemp()*100);
+						int16_t humidity = (int16_t)(getHumidity()*100);
+						unsigned char buf[]={START_BYTE,
+							(unsigned char) sequenceID,
+							0, // fill in size later
 							(unsigned char) SENSOR,
 							(unsigned char) READ,
 							(unsigned char) bufPtr[1],
@@ -532,30 +504,6 @@ void HandleSensorCommand(unsigned char *bufPtr) {
 				}
 				break;
 			}
-#ifdef DEBUG
-		case TEST_EVENT: // stops timer via handle
-			{
-				unsigned char buf[4];
-				int size;
-				switch (bufPtr[1]) {
-					case CURRENTPROBE:
-						buf[0]=	(unsigned char)((currentSensor.lastCurrentReadingx1000 >> 8) & 0xFF);
-						buf[1]=	(unsigned char)(currentSensor.lastCurrentReadingx1000 & 0xFF);
-						size=2;	
-						break;
-					case DISTSENSOR1:
-						buf[0]=	(unsigned char)((distanceSensor.distance >> 8) & 0xFF);
-						buf[1]=	(unsigned char)(distanceSensor.distance & 0xff);
-						size=2;	
-						break;
-					default:
-						sprint("Unsupported sensor: ");sprintln(bufPtr[1]);
-						break;
-				}
-				addEvent(SENSOR,bufPtr[1],buf,size);
-				break;
-			}
-#endif
 		case SET_ALARM_THRESHOLD: // should provide polling interval in ms, threshold low,high
 			{
 				Serial.println("SET_ALARM_THRESHOLD");
@@ -593,7 +541,7 @@ void receiveData(int byteCount){
 		if (!ringBufS_full(&rxBuffer)) {
 			unsigned char rc = Wire.read();
 #ifdef PRINT_HEX
-			 	sprint(">");sprintln(rc,HEX);
+			sprint(">");sprintln(rc,HEX);
 #endif       
 			ringBufS_put (&rxBuffer, rc);
 		}
@@ -607,30 +555,23 @@ void receiveData(int byteCount){
 }	
 
 void sendData(void) {
-#if 0
-if(!ringBufS_empty(&txBuffer)) {
-		Wire.write(ringBufS_get(&txBuffer));
-		if(ringBufS_empty(&txBuffer)) 
+	if(!ringBufS_empty(&txBuffer)) {
+		unsigned char sendByte = ringBufS_get(&txBuffer);
+		Wire.write(sendByte);
+		// sprint("<");sprintln(sendByte,HEX);
+
+		if(ringBufS_empty(&txBuffer)) {
 			digitalWrite(I2C_READY_TO_PI,0); 
+		}
 	}
-#endif
-if(!ringBufS_empty(&txBuffer)) {
-    unsigned char sendByte = ringBufS_get(&txBuffer);
-    Wire.write(sendByte);
-       // sprint("<");sprintln(sendByte,HEX);
-    
-    if(ringBufS_empty(&txBuffer))
-     {
-      digitalWrite(I2C_READY_TO_PI,0); 
-     }
-  }
 }
 
 void GenerateInterrupt(int state){
 	digitalWrite(INT_TO_PI, state);
 }
+
 void initSensor(struct sensor_data *sensor) {
-  
+
 	sensor->low_threshold=0;
 	sensor->high_threshold=0;
 	sensor->flags=0;
@@ -638,7 +579,7 @@ void initSensor(struct sensor_data *sensor) {
 }
 
 void setup() {
-  Serial.begin(57600);
+	Serial.begin(57600);
 	// initialize i2c as slave
 	Wire.begin(SLAVE_ADDRESS);
 	// define callbacks for i2c communication
@@ -693,12 +634,11 @@ void parseCommand(void) {
 unsigned char getByte(ringBufS *rb){
 	int rc=-1;
 	noInterrupts();
-   rc =ringBufS_get(rb);
-  while ( rc < 0)
-  {
-	   rc =ringBufS_get(rb);
-  }
-  interrupts();
+	rc =ringBufS_get(rb);
+	while ( rc < 0) {
+		rc =ringBufS_get(rb);
+	}
+	interrupts();
 	return (unsigned char)rc;
 }
 
@@ -720,42 +660,22 @@ void parseData(ringBufS *buffer){
 				xor_cs = START_BYTE;
 				zeroCount=0;
 			}
-			else if (rc == LOOP_BACK_BYTE) {
-				receive_state = LOOP_BACK_GET_LENGTH;
-			}
-			else if (rc == 0){
+			else if (rc == 0) {
 				zeroCount++;
-				if (zeroCount >= ZERO_RESET_COUNT)
+				if (zeroCount >= ZERO_RESET_COUNT) {
 					resetFunc();
+				}
 
 			}
 			else {
 				sprint("invalid char. expecting 0xBD, found "); sprintln(rc,HEX);
 			}
 		}
-#if 0
-		else if (receive_state == LOOP_BACK_GET_LENGTH) {
-			sprintln("LPL");
-			receive_read_count=ringBufS_get(&rxBuffer);
-			ringBufS_put(&txBuffer,LOOP_BACK_BYTE);
-			ringBufS_put(&txBuffer,receive_read_count);
-			xor_cs = LOOP_BACK_BYTE^receive_read_count;
-			receive_state = LOOP_BACK_BYTES;
+		else if (receive_state == GET_SEQUENCE_ID) {
+			sequenceID=getByte(&rxBuffer);
+			receive_state = GET_LENGTH_BYTE;
+			xor_cs ^= sequenceID;
 		}
-		else if (receive_state == LOOP_BACK_BYTES) {
-			sprintln("LPB");
-			unsigned char rc=ringBufS_get(&rxBuffer);
-			if (++receive_byte_index == receive_read_count) 
-				receive_state = GET_START_BYTE;
-			xor_cs^=rc;
-			ringBufS_put(&txBuffer,rc);
-		}
-#endif
-    else if (receive_state == GET_SEQUENCE_ID) {
-        sequenceID=getByte(&rxBuffer);
-        receive_state = GET_LENGTH_BYTE;
-        xor_cs ^= sequenceID;
-      }
 		else if (receive_state == GET_LENGTH_BYTE) {
 			if ((receive_read_count=getByte(&rxBuffer)) <= MAX_DATA_REQUEST) {
 				xor_cs^=receive_read_count;
@@ -768,7 +688,6 @@ void parseData(ringBufS *buffer){
 			}
 		}
 		else if (receive_state == GET_DATA_BYTE) {
-
 			unsigned char rc;
 			rc=getByte(&rxBuffer);
 			receive_buffer[receive_byte_index++] = rc;	
@@ -779,8 +698,8 @@ void parseData(ringBufS *buffer){
 		}
 		else if (receive_state == GET_CS_BYTE) {
 			unsigned char rc;
-		rc=getByte(&rxBuffer);
- 
+			rc=getByte(&rxBuffer);
+
 			if (xor_cs == rc) {
 				// cs good
 				receive_state = PARSE_COMMAND;
@@ -793,8 +712,9 @@ void parseData(ringBufS *buffer){
 				receive_state = GET_START_BYTE;
 			}
 		}
-		else
+		else {
 			sprintln("nada"); // jwd set error event here
+		}
 
 		if (receive_state == PARSE_COMMAND) { 
 			parseCommand();
@@ -804,10 +724,12 @@ void parseData(ringBufS *buffer){
 }
 
 void loop() {
-	if (distanceSensor.sensor.timerHandle >= 0)
+	if (distanceSensor.sensor.timerHandle >= 0) {
 		distanceSensor.sensor.timer.update();
-	if (currentSensor.sensor.timerHandle >= 0)
+	}
+	if (currentSensor.sensor.timerHandle >= 0) {
 		currentSensor.sensor.timer.update();
+	}
 
 	while(!ringBufS_empty(&rxBuffer)) {
 		parseData(&rxBuffer);
