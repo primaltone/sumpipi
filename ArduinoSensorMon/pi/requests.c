@@ -30,9 +30,9 @@ void initRequestList (struct request_list *list, void (*handler)(struct request*
  * algorithm: creates a request structure, adds to the list, and
  *            increases number of pending requests by one.
  * input:     request number, linked list mutex.
- * output:    none.
+ * output:    return code of pthread calls.
  */
-void add_request(struct request_list *list, int request_num, pthread_mutex_t* p_mutex, pthread_cond_t*  p_cond_var)
+int add_request(struct request_list *list, int request_num, pthread_mutex_t* p_mutex, pthread_cond_t*  p_cond_var)
 {
 	int rc;	                    /* return code of pthreads functions.  */
 	struct request* a_request;      /* pointer to newly added request.     */
@@ -68,6 +68,7 @@ void add_request(struct request_list *list, int request_num, pthread_mutex_t* p_
 
 	/* signal the condition variable - there's a new request to handle */
 	rc = pthread_cond_signal(p_cond_var);
+	return rc;
 }
 
 /*
@@ -81,11 +82,10 @@ void add_request(struct request_list *list, int request_num, pthread_mutex_t* p_
  */
 struct request* get_request(struct request_list *list, pthread_mutex_t* p_mutex)
 {
-	int rc;	                    /* return code of pthreads functions.  */
 	struct request* a_request;      /* pointer to request.                 */
 
 	/* lock the mutex, to assure exclusive access to the list */
-	rc = pthread_mutex_lock(p_mutex);
+	pthread_mutex_lock(p_mutex); // jwd should check and handle return code
 
 	if (list->num_requests > 0) {
 		a_request = list->requests;
@@ -101,7 +101,7 @@ struct request* get_request(struct request_list *list, pthread_mutex_t* p_mutex)
 	}
 
 	/* unlock mutex */
-	rc = pthread_mutex_unlock(p_mutex);
+	pthread_mutex_unlock(p_mutex); // jwd should check and handle return code
 
 	/* return the request to the caller. */
 	return a_request;
@@ -133,12 +133,11 @@ void handle_request(struct request* a_request)
  */
 void* handle_requests_loop(void* data)
 {
-	int rc;	                    /* return code of pthreads functions.  */
 	struct request* a_request;      /* pointer to a request.               */
 	struct request_list *list= (struct request_list*)data;
 
 	/* lock the mutex, to access the requests list exclusively. */
-	rc = pthread_mutex_lock(&list->request_mutex);
+	pthread_mutex_lock(&list->request_mutex); // jwd should handle return code 
 
 	/* do forever.... */
 	while (1) {
@@ -154,7 +153,7 @@ void* handle_requests_loop(void* data)
 			/* wait for a request to arrive. note the mutex will be */
 			/* unlocked here, thus allowing other threads access to */
 			/* requests list.                                       */
-			rc = pthread_cond_wait(&list->got_request, &list->request_mutex);
+			pthread_cond_wait(&list->got_request, &list->request_mutex); //jwd should handle return code  
 			/* and after we return from pthread_cond_wait, the mutex  */
 			/* is locked again, so we don't need to lock it ourselves */
 		}

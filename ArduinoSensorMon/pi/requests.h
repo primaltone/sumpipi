@@ -32,7 +32,7 @@ void initRequestList (struct request_list *list, void (*handler)(struct request*
  * input:     request number, linked list mutex.
  * output:    none.
  */
-void add_request(struct request_list *list, int request_num, pthread_mutex_t* p_mutex, pthread_cond_t*  p_cond_var);
+int add_request(struct request_list *list, int request_num, pthread_mutex_t* p_mutex, pthread_cond_t*  p_cond_var);
 
 /*
  * function get_request(): gets the first pending request from the requests list

@@ -316,7 +316,7 @@ int getArduinoI2Cdata(char *buf, int size, const int fd) {
 }
 
 int GetEvent(void) {
-	int rc, i;
+	int rc;
 	char getEvent[]={START_BYTE,sequenceID++,1,EVENT,0};
 	char rspBuf[32]; // jwd fixme
 
@@ -330,7 +330,6 @@ int GetEvent(void) {
 				int strSize;
 				char buf[64];
 				int distance = ((rspBuf[3] << 8) | rspBuf[4]);
-				float percent_change;
 				float waterHeight;
 
 				// sensor measures distance to water. convert to height from bottom of well
@@ -392,7 +391,7 @@ int ReadSensorData(int sensorID) {
 		switch(sensorID) {
 			case DISTSENSOR1:
 				{
-					int strSize,tmpFileFD;
+					int strSize;
 					char buf[64];
 					int distance = ((rspBuf[3] << 8) | rspBuf[4]);
 					float waterHeight;
@@ -408,8 +407,10 @@ int ReadSensorData(int sensorID) {
 				break;
 			case CURRENTPROBE:
 				{
+					#ifdef PRINT_SENSOR
 					int current = ((rspBuf[3] << 8) | rspBuf[4]);
 					printSensor("sump current: %dmA\n",current);
+					#endif
 				}
 				break;
 			case TEMP_HUMIDITY:
@@ -424,7 +425,7 @@ int ReadSensorData(int sensorID) {
 						rc = -1;
 						break;
 					}
-					strSize=snprintf(buf,sizeof(buf)-1,"temperature: %.2fF humidity: %.2f\%\n",
+					strSize=snprintf(buf,sizeof(buf)-1,"temperature: %.2fF humidity: %.2f%%\n",
 							temperature,humidity);
 					printSensor("%s",buf);
 					SaveSample(time(NULL),buf,strSize,logFolder,TEMP_HUMIDITY_LOG);
@@ -609,12 +610,12 @@ void setupSumpData(void) {
 		char tag[16];
 		while( fscanf(pFile,"%s",tag) != EOF ) {
 			if( strncmp(tag,SUMP_CYCLE_FIELD,strlen(SUMP_CYCLE_FIELD)) == 0 ) {
-				if (fscanf(pFile,"%ul",&sumpRunCycles) != 1) {
+				if (fscanf(pFile,"%lu",&sumpRunCycles) != 1) {
 					printf("error storing saved sump cycle");
 				}
 			}
 			else if( strncmp(tag,SUMP_TIME_FIELD,strlen(SUMP_TIME_FIELD)) == 0 ) {
-				if (fscanf(pFile,"%ul",&sumpRunTime_ms) != 1) {
+				if (fscanf(pFile,"%lu",&sumpRunTime_ms) != 1) {
 					printf("error storing saved sump run time");
 				}
 			}
@@ -696,12 +697,6 @@ void PrintSyntax( char *executableName ) {
 int main( int argc, char * argv[] ) {
 	const int deviceI2CAddress = 0x04;
 #define RSP_BUF_SIZE 16	
-	char rspBuf[RSP_BUF_SIZE];
-	int rspLength;
-	char timerBufTime[2];
-	unsigned int timerDuration=0x800;
-
-	int i=1; //jwd fix me too
 
 	if ( (argc > 1) &&  (((argv[1][0] == '/') || (argv[1][0] == '-')) && (argv[1][1] == '?'))) {
 		PrintSyntax(argv[0]);
