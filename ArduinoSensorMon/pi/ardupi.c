@@ -97,15 +97,15 @@ char *emailAddressFrom=NULL;
 int arduinoI2Cfd;
 int GetEvent(void);
 void UpdateSumpStats(void);
-int SendCmd(const unsigned char command, const unsigned char subcommand, const unsigned char type,
-		const unsigned char *dataBuf, const unsigned char dataSize);
+int SendCmd(const char command, const char subcommand, const char type,
+		const char *dataBuf, const char dataSize);
 void setupAlarmThresholds(void);
-int getResponse(unsigned char *buf, int bufSize);
+int getResponse(char *buf, int bufSize);
 unsigned long sumpRunTime_ms=0;
 unsigned long sumpRunCycles=0;
 struct request_list reqList;
 // jwd move timer stuff to different file
-unsigned char sequenceID=0;
+char sequenceID=0;
 int verbose=1; // jwd change me
 /*
    for saving samples, combine sump distance with pump data. i.e.:
@@ -161,7 +161,7 @@ char * FormatDate(const time_t time, char *dateStr,const int bufsize) {
 	return dateStr;
 }
 
-int SaveSample(const time_t time, unsigned char *buf, unsigned int bufSize, char *basePath, char *fileName) {
+int SaveSample(const time_t time, char *buf, unsigned int bufSize, char *basePath, char *fileName) {
 	int Output_fd, rc=-1; char buffer [128]; char timeBuf[128]; char fullLogFileName[128];
 	struct stat st = {0};
 	char dateBuf[11];
@@ -184,7 +184,7 @@ int SaveSample(const time_t time, unsigned char *buf, unsigned int bufSize, char
 	}
 	else if ((stat(fullLogFileName, &st) == -1) && (mkdir(fullLogFileName, 0777)==-1)) {
 		mkdir(fullLogFileName, 0777);
-		printf("Error creating date folder %s\n");
+		printf("Error creating date folder\n");
 	}
 	else if (!strncat(fullLogFileName,fileName,sizeof(fullLogFileName))) {
 		printf("Error adding file name to path\n");
@@ -254,7 +254,7 @@ void arduinoInterrupt(void) {
 	add_request(&reqList,GET_EVENT, &reqList.request_mutex, &reqList.got_request);
 }
 
-int i2cWriteBlock(unsigned char * buf, int bytesToWrite, const int fd) {
+int i2cWriteBlock(char * buf, int bytesToWrite, const int fd) {
 	int rc=0;
 	int bytesWritten=0;
 	while((bytesToWrite--) && ((rc=wiringPiI2CWrite (fd,*buf++)) >= 0)) {
@@ -263,7 +263,7 @@ int i2cWriteBlock(unsigned char * buf, int bytesToWrite, const int fd) {
 #ifdef PRINT_I2C
 	{
 		int i;
-		unsigned char *bufStart=buf-bytesWritten;
+		char *bufStart=buf-bytesWritten;
 		for (i=0; i< bytesWritten;i++) {
 			printI2C("%02x@",*bufStart++);
 		}
@@ -277,16 +277,16 @@ int i2cWriteBlock(unsigned char * buf, int bytesToWrite, const int fd) {
 	return rc;
 }
 
-unsigned char xor_cs (unsigned char *buf, int size) {
+char xor_cs (char *buf, int size) {
 	int i;
-	unsigned char cs=0;
+	char cs=0;
 	for (i=0; i<(size);i++) {
 		cs^=buf[i];
 	}
 	return cs;
 }
 
-int getArduinoI2Cdata(unsigned char *buf, int size, const int fd) {
+int getArduinoI2Cdata(char *buf, int size, const int fd) {
 	int rc=0, bytesRead = 0;
 	int retryCount=0;
 #define MAX_RETRY 500	
@@ -296,7 +296,7 @@ int getArduinoI2Cdata(unsigned char *buf, int size, const int fd) {
 			usleep(2000); // wait 2ms for more data
 		}
 		else if((size--) && ((rc=wiringPiI2CRead(fd)) >= 0)) {
-			*buf++ = (unsigned char)rc;
+			*buf++ = (char)rc;
 			printI2C("*%02x",rc);
 			bytesRead++;
 			retryCount=0;
@@ -317,7 +317,7 @@ int getArduinoI2Cdata(unsigned char *buf, int size, const int fd) {
 
 int GetEvent(void) {
 	int rc, i;
-	unsigned char getEvent[]={START_BYTE,sequenceID++,1,EVENT,0};
+	char getEvent[]={START_BYTE,sequenceID++,1,EVENT,0};
 	char rspBuf[32]; // jwd fixme
 
 	getEvent[sizeof(getEvent)-1]= xor_cs(getEvent,sizeof(getEvent)-1);
@@ -438,13 +438,13 @@ int ReadSensorData(int sensorID) {
 	return rc;
 }
 
-int getResponse(unsigned char *buf, int bufSize) {
+int getResponse(char *buf, int bufSize) {
 	int rc;
-	unsigned char dataSize, rxCS, SB,sequenceID;
+	char dataSize, rxCS, SB,sequenceID;
 
 	if (((rc=getArduinoI2Cdata(&SB, 1, arduinoI2Cfd)) < 0) || (SB != START_BYTE)) {// 1) validate start byte
 		if (rc >=0 ) {
-			printf("searching for 0x%02x but received 0x%02x\n",(unsigned char)START_BYTE,SB);	
+			printf("searching for 0x%02x but received 0x%02x\n",(char)START_BYTE,SB);	
 		}
 		else {
 			printf("Error reading from I2C device\n");
@@ -468,10 +468,10 @@ int getResponse(unsigned char *buf, int bufSize) {
 		printf("Error receiving cheksum from device: rc =  %d\n",rc);
 	}
 	else {
-		unsigned char calcCS=0;
+		char calcCS=0;
 		int i;
 
-		calcCS = START_BYTE^(unsigned char)dataSize^sequenceID;
+		calcCS = START_BYTE^(char)dataSize^sequenceID;
 		for(i=0;i<dataSize; i++) {
 			calcCS^=buf[i];
 		}
@@ -484,21 +484,21 @@ int getResponse(unsigned char *buf, int bufSize) {
 	return rc;
 }
 
-int SendCmd(const unsigned char command, const unsigned char subcommand, const unsigned char type,
-		const unsigned char *dataBuf, const unsigned char dataSize) {
+int SendCmd(const char command, const char subcommand, const char type,
+		const char *dataBuf, const char dataSize) {
 	// <start byte> <size> <sensor> <sensor read> <sensor id>
 	// <start byte> <size> <command> <subcommand > <type> <data> <size>
 	int rc;
 	int sendBufSize;
-	unsigned char cs;
-	unsigned char *sendBuf;
+	char cs;
+	char *sendBuf;
 #define CS_SIZE		1
 #define SEQUENCE_BYTE_SIZE	1
 #define START_BYTE_SIZE	1
 #define DATA_SIZE_BYTE	1
 	sendBufSize = START_BYTE_SIZE + SEQUENCE_BYTE_SIZE + DATA_SIZE_BYTE + sizeof(command)+sizeof(subcommand)
 		+sizeof(type)+dataSize+CS_SIZE;
-	sendBuf = (unsigned char *)malloc(sendBufSize);
+	sendBuf = (char *)malloc(sendBufSize);
 	if (sendBuf) {
 		sendBuf[0]=START_BYTE;
 		sendBuf[1]=sequenceID++;
@@ -523,7 +523,7 @@ int SendCmd(const unsigned char command, const unsigned char subcommand, const u
 }
 
 int EnableSensor(int sensorID, int timerDuration_ms) {
-	unsigned char timerBufTime[2];	
+	char timerBufTime[2];	
 
 	timerBufTime[0] = (timerDuration_ms >> 8) & 0xFF; 
 	timerBufTime[1] = timerDuration_ms & 0xFF; 
@@ -656,8 +656,8 @@ int setupLogDir(char *logDir) {
 	}
 	return rc;
 }
-void setupAlarmThreshold(unsigned char sensorid, unsigned int th_low, unsigned int th_high) {
-	unsigned char buf[4];
+void setupAlarmThreshold(char sensorid, unsigned int th_low, unsigned int th_high) {
+	char buf[4];
 
 	buf[0]=(th_low>>8)&0xFF;
 	buf[1]=th_low&0xFF;
@@ -678,7 +678,7 @@ void setupAlarmThresholds(void) {
 }
 
 void arduinoReset(int fd){
-	unsigned char flushBuf[32];
+	char flushBuf[32];
 	memset(flushBuf,0,sizeof(flushBuf));
 	i2cWriteBlock(flushBuf,sizeof(flushBuf), arduinoI2Cfd);
 	sleep(1);
@@ -696,9 +696,9 @@ void PrintSyntax( char *executableName ) {
 int main( int argc, char * argv[] ) {
 	const int deviceI2CAddress = 0x04;
 #define RSP_BUF_SIZE 16	
-	unsigned char rspBuf[RSP_BUF_SIZE];
+	char rspBuf[RSP_BUF_SIZE];
 	int rspLength;
-	unsigned char timerBufTime[2];
+	char timerBufTime[2];
 	unsigned int timerDuration=0x800;
 
 	int i=1; //jwd fix me too
